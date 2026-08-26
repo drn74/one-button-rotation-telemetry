@@ -1,0 +1,8 @@
+## Interface: 11200
+## Title: WRH Telemetry
+## Notes: Espone lo stato di One Button Rotation (stance, rage, HP, ecc.) come una fila di pixel colorati in basso a sinistra, per essere letta da un programma esterno e mostrata in overlay durante lo streaming. Sola lettura: nessuna automazione, nessun input simulato.
+## Author: Daniele
+## Version: 0.1.0
+## OptionalDeps: One_Button_Rotation
+
+WRH_Telemetry.lua

@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""WRH Telemetry reader.
+
+Legge i quadratini colorati disegnati dall'addon WRH_Telemetry (Addon/WRH_Telemetry) in un angolo
+dello schermo di WoW e li mostra come tabella testuale in console, per essere ripresa in uno stream
+(es. con una window/game capture della console stessa, o un crop OBS). Sola lettura passiva dello
+schermo: non invia mai input al gioco, non clicca, non preme tasti.
+
+Uso tipico:
+    python reader.py --left 0 --bottom 1080
+
+--left/--bottom sono le coordinate assolute sullo schermo (stesso sistema usato da un tool come
+pyautogui.position() o le impostazioni di OBS) dell'angolo in basso a sinistra della finestra di
+gioco, perche' l'addon ancora i quadratini a BOTTOMLEFT dello schermo di gioco (vedi README.md per
+la procedura di calibrazione completa e /wrht calibrate in game).
+"""
+
+import argparse
+import sys
+import time
+
+import mss
+
+import protocol
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--left", type=int, help="coordinata X assoluta sullo schermo dell'angolo in basso a sinistra della finestra di gioco")
+    p.add_argument("--bottom", type=int, help="coordinata Y assoluta sullo schermo del bordo inferiore della finestra di gioco")
+    p.add_argument("--interval", type=float, default=0.2, help="secondi tra una lettura e l'altra (default 0.2, come l'update dell'addon)")
+    p.add_argument("--once", action="store_true", help="una sola lettura, stampa e esce (utile per calibrare)")
+    p.add_argument("--list-monitors", action="store_true", help="stampa i monitor rilevati da mss (coordinate assolute) ed esce, senza leggere l'addon")
+    return p.parse_args()
+
+
+def read_row(sct, region):
+    shot = sct.grab(region)
+    width = shot.width
+    rgb = shot.rgb  # bytes, 3 per pixel (R,G,B), gia' riordinati da mss
+
+    values = []
+    for i in range(protocol.NUM_SQUARES):
+        cx = i * protocol.SQUARE_SIZE + protocol.SQUARE_SIZE // 2
+        cy = protocol.SQUARE_SIZE // 2
+        idx = (cy * width + cx) * 3
+        r = rgb[idx]  # l'addon scrive R=G=B (scala di grigi): un solo canale basta
+        values.append(r)
+    return values
+
+
+def format_table(decoded, sync_ok):
+    lines = []
+    lines.append("=" * 46)
+    if not sync_ok:
+        lines.append(" WRH TELEMETRY  [!] non allineato / addon non rilevato")
+        lines.append("=" * 46)
+        lines.append(" verifica --left/--bottom con /wrht calibrate in game")
+        return "\n".join(lines)
+
+    lines.append(" WRH TELEMETRY")
+    lines.append("=" * 46)
+    rows = [
+        ("Stance", decoded["stance"]),
+        ("In combattimento", "si" if decoded["in_combat"] else "no"),
+        ("Target", "si" if decoded["has_target"] else "no"),
+        ("HP giocatore", "%d%%" % decoded["player_hp_pct"]),
+        ("Rage", str(decoded["rage"])),
+        ("HP target", "%d%%" % decoded["target_hp_pct"]),
+        ("Sunder Armor", "%d/5" % decoded["sunder_stacks"]),
+        ("Rend", "si" if decoded["rend_applied"] else "no"),
+        ("Demoralizing Shout", "si" if decoded["demo_shout_applied"] else "no"),
+        ("Finestra Overpower", "aperta" if decoded["overpower_window"] else "-"),
+        ("Finestra Revenge", "aperta" if decoded["revenge_window"] else "-"),
+        ("Attaccanti recenti", str(decoded["recent_attackers"])),
+        ("Autoattack", "attivo" if decoded["autoattack_active"] else "fermo"),
+        ("Ultima azione", decoded["last_action_name"]),
+    ]
+    label_width = max(len(r[0]) for r in rows)
+    for label, value in rows:
+        lines.append(" %s : %s" % (label.ljust(label_width), value))
+    lines.append("=" * 46)
+    lines.append(" heartbeat=%d" % decoded["heartbeat"])
+    return "\n".join(lines)
+
+
+def clear_screen():
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.flush()
+
+
+def main():
+    args = parse_args()
+
+    with mss.mss() as sct:
+        if args.list_monitors:
+            for i, mon in enumerate(sct.monitors):
+                print(i, mon)
+            return
+
+        if args.left is None or args.bottom is None:
+            print("errore: --left e --bottom sono obbligatori (usa --list-monitors per capire le coordinate del tuo schermo, poi vedi README.md per la calibrazione)")
+            sys.exit(1)
+
+        region = {
+            "left": args.left,
+            "top": args.bottom - protocol.SQUARE_SIZE,
+            "width": protocol.NUM_SQUARES * protocol.SQUARE_SIZE,
+            "height": protocol.SQUARE_SIZE,
+        }
+
+        last_heartbeat = None
+        stale_since = None
+
+        while True:
+            values = read_row(sct, region)
+            sync_ok = protocol.is_sync_valid(values[protocol.SYNC])
+            decoded = protocol.decode(values) if sync_ok else None
+
+            clear_screen()
+            print(format_table(decoded, sync_ok))
+
+            if sync_ok:
+                if decoded["heartbeat"] == last_heartbeat:
+                    if stale_since is None:
+                        stale_since = time.time()
+                    elif time.time() - stale_since > 3:
+                        print(" [!] heartbeat fermo da oltre 3s: /reload, logout o gioco in pausa?")
+                else:
+                    stale_since = None
+                last_heartbeat = decoded["heartbeat"]
+
+            if args.once:
+                return
+            time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    main()
