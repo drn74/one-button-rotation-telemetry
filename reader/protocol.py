@@ -29,11 +29,25 @@ AUTOATTACK_ACTIVE = 14
 LAST_ACTION_KIND = 15
 LAST_ACTION_ID = 16
 
-SYNC_EXPECTED_VALUE = 255
-# Tolleranza sul valore letto per il quadratino di sync: su schermo reale (font hinting del
+# Ogni pixel porta un intero 0-16777215 (24 bit) spalmato su R (byte alto), G (byte medio),
+# B (byte basso) - value = R*65536 + G*256 + B. Ordine confermato sulla fonte reale della tecnica
+# (Xian55/WowClassicGrindBot, Addons/DataToColor/DataToColor.lua, funzione int()): R e' il byte piu'
+# significativo, non il meno significativo - vedi il commento in testa a WRH_Telemetry.lua.
+MAX_PIXEL_VALUE = 16777215
+
+
+def rgb_to_value(r, g, b):
+    return (r << 16) | (g << 8) | b
+
+
+CHANNEL_EXPECTED_VALUE = 255
+# Tolleranza per canale sul pixel di sync (atteso R=G=B=255): su schermo reale (font hinting del
 # gioco, eventuale leggero color management del sistema) raramente si legge un 255 esatto al
-# pixel; sotto questa soglia consideriamo comunque l'allineamento valido.
-SYNC_TOLERANCE = 10
+# pixel; sotto questa soglia per OGNI canale consideriamo comunque l'allineamento valido. Controllo
+# per canale (non sul valore intero composito) perche' un errore di pochi livelli sul byte alto
+# sposterebbe il valore composito di decine di migliaia, mentre lo stesso errore sul byte basso e'
+# quasi ininfluente - un'unica soglia sull'intero sarebbe inconsistente tra i tre canali.
+CHANNEL_TOLERANCE = 10
 
 STANCE_NAMES = {
     0: "nessuna",
@@ -78,8 +92,11 @@ ACTION_NAMES = {
 
 
 def decode(values):
-    """values: lista di 17 interi 0-255 (uno per quadratino, letti dal canale R). Ritorna un dict
-    con i campi decodificati in forma leggibile."""
+    """values: lista di 17 interi 0-16777215, uno per pixel, gia' decodificati da (R,G,B) con
+    rgb_to_value(). Ritorna un dict con i campi decodificati in forma leggibile. Tutti i campi
+    attuali stanno entro 0-255 (percentuali, flag, contatori piccoli), quindi la logica sotto
+    tratta i valori decodificati come se fossero ancora byte singoli - resta comunque corretta
+    anche se in futuro un campo dovesse usare il range piu' ampio."""
 
     def flag(i):
         return values[i] >= 128
@@ -111,5 +128,9 @@ def decode(values):
     }
 
 
-def is_sync_valid(sync_value):
-    return abs(sync_value - SYNC_EXPECTED_VALUE) <= SYNC_TOLERANCE
+def is_sync_valid(r, g, b):
+    return (
+        abs(r - CHANNEL_EXPECTED_VALUE) <= CHANNEL_TOLERANCE
+        and abs(g - CHANNEL_EXPECTED_VALUE) <= CHANNEL_TOLERANCE
+        and abs(b - CHANNEL_EXPECTED_VALUE) <= CHANNEL_TOLERANCE
+    )

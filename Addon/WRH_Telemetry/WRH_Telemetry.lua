@@ -12,9 +12,22 @@
 -- mostrare l'ultima azione REALMENTE eseguita da quell'addon - se assente, il campo resta vuoto,
 -- il resto della telemetria funziona comunque.
 --
+-- Codifica colore: ogni pixel porta UN valore intero 0-16777215 (24 bit), spalmato sui tre canali
+-- byte-alto/medio/basso -> R/G/B (value = R*65536 + G*256 + B). Ordine verificato sulla fonte reale
+-- della tecnica (Xian55/WowClassicGrindBot, Addons/DataToColor/DataToColor.lua, funzione int():
+-- R = band(rshift(value,16),255), G = band(rshift(value,8),255), B = band(value,255) - NON
+-- low-byte-in-R come si potrebbe assumere, e' il contrario: R e' il byte piu' significativo).
+-- Quella fonte usa la libreria bit (rshift/band, LuaJIT/Lua 5.1) - qui invece aritmetica pura
+-- (math.floor + sottrazione), perche' in Lua 5.0 (1.12.1 vanilla) la libreria bit non e' garantita
+-- disponibile (stesso genere di limite gia' documentato nel progetto principale). Vedi ValueToColor
+-- sotto. Tutti i nostri valori attuali stanno comunque entro 0-255 (quindi R=G=0, B=valore quasi
+-- sempre) - il redesign serve a seguire la tecnica corretta e a lasciare margine per valori piu'
+-- grandi in futuro (es. HP/rage assoluti invece che percentuali), non per necessita' immediata.
+--
 -- Protocollo (vedi anche README.md nel repo, e reader/protocol.py sul lato Python - le due liste
 -- DEVONO restare sincronizzate a mano, non c'e' generazione automatica):
--- indice 0  sync marker, sempre 255 - il reader lo usa per verificare l'allineamento del capture
+-- indice 0  sync marker, sempre 16777215 (bianco puro, R=G=B=255) - il reader lo usa per verificare
+--           l'allineamento del capture
 -- indice 1  heartbeat, contatore 0-255 che avanza a ogni update - il reader lo usa per rilevare che
 --           i dati sono "vivi" (se non cambia piu', l'addon non sta aggiornando: reload/logout/ecc.)
 -- indice 2  stance: 0=nessuna, 1=Battle, 2=Berserker, 3=Defensive
@@ -350,15 +363,30 @@ end
 
 local rootFrame = CreatePixelFrame()
 
-local function SetSquare(index, value)
+local MAX_PIXEL_VALUE = 16777215 -- 2^24 - 1, il massimo rappresentabile su 3 byte (R,G,B)
+
+-- Scompone value (0-16777215) in byte alto/medio/basso -> R/G/B, come confermato dalla fonte reale
+-- della tecnica (vedi commento in testa al file): R e' il byte piu' significativo, B il meno
+-- significativo. Aritmetica pura (niente libreria bit, non garantita in Lua 5.0/1.12.1).
+local function ValueToColor(value)
 	value = value or 0
 	if value < 0 then
 		value = 0
-	elseif value > 255 then
-		value = 255
+	elseif value > MAX_PIXEL_VALUE then
+		value = MAX_PIXEL_VALUE
 	end
-	local c = value / 255
-	squares[index]:SetTexture(c, c, c, 1)
+
+	local blue = value - math.floor(value / 256) * 256
+	local rest = math.floor(value / 256)
+	local green = rest - math.floor(rest / 256) * 256
+	local red = math.floor(rest / 256)
+
+	return red / 255, green / 255, blue / 255
+end
+
+local function SetSquare(index, value)
+	local r, g, b = ValueToColor(value)
+	squares[index]:SetTexture(r, g, b, 1)
 end
 
 local function ClampPct(v)
@@ -455,7 +483,7 @@ local function UpdateSquares()
 
 	local s = GatherState()
 
-	SetSquare(0, 255) -- sync marker
+	SetSquare(0, MAX_PIXEL_VALUE) -- sync marker (bianco puro, R=G=B=255)
 	SetSquare(1, heartbeat)
 	SetSquare(2, STANCE_IDS[s.stance] or 0)
 	SetSquare(3, s.inCombat and 1 or 0)

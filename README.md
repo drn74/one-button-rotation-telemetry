@@ -19,6 +19,12 @@ altri input al gioco, non decide alcuna azione. Non è un bot e non pilota il pe
 solo a portare informazioni già visibili in game su un secondo programma per motivi di
 streaming/telemetria.
 
+La codifica RGB (vedi "Protocollo" sotto) prende ispirazione dalla tecnica pixel-to-data usata da
+[WowClassicGrindBot](https://github.com/Xian55/WowClassicGrindBot) (un framework di botting, non
+affiliato a questo progetto) — qui viene riusata solo la formula di conversione intero↔colore in sé
+(un dettaglio di codifica generico, non specifico al botting), per lo stesso scopo di sola
+visualizzazione descritto sopra. Nessun codice di automazione di quel progetto è stato copiato.
+
 ## Struttura del repository
 
 ```
@@ -82,16 +88,23 @@ segnala se lo `heartbeat` smette di avanzare (addon fermo: reload, logout, gioco
 ## Protocollo
 
 17 pixel fisici in fila da sinistra a destra (1 pixel = 1 valore, riga alta 1px, larga 17px in
-totale — quasi invisibile), un solo canale (R, dato che l'addon scrive sempre R=G=B in scala di
-grigi) per valore 0-255. Nessun margine di errore sull'allineamento a questa dimensione: vedi
-"Calibrazione" sotto. Definito in
-`Addon/WRH_Telemetry/WRH_Telemetry.lua` (commento in testa al file) e mirrorato in
-`reader/protocol.py` — le due liste vanno mantenute sincronizzate a mano, non c'è generazione
-automatica.
+totale — quasi invisibile). Nessun margine di errore sull'allineamento a questa dimensione: vedi
+"Calibrazione" sotto.
+
+Ogni pixel porta un intero **0-16.777.215** (24 bit) spalmato sui tre canali: `valore = R*65536 +
+G*256 + B` (R = byte più significativo, G = medio, B = meno significativo). Ordine verificato sulla
+fonte reale della tecnica ([Xian55/WowClassicGrindBot](https://github.com/Xian55/WowClassicGrindBot),
+`Addons/DataToColor/DataToColor.lua`, funzione `int()`) — R porta il byte alto, non il basso. Tutti
+i campi attuali stanno comunque entro 0-255 (percentuali, flag, contatori piccoli), quindi R e G
+restano quasi sempre a 0 e solo B varia: il redesign segue la tecnica corretta e lascia margine per
+valori più grandi in futuro (es. HP/rage assoluti invece di percentuali), non risponde a una
+necessità immediata. Definito in `Addon/WRH_Telemetry/WRH_Telemetry.lua` (commento in testa al
+file, funzione `ValueToColor`) e mirrorato in `reader/protocol.py` (`rgb_to_value`) — le due liste
+vanno mantenute sincronizzate a mano, non c'è generazione automatica.
 
 | # | Campo | Valori |
 |---|-------|--------|
-| 0 | sync marker | sempre 255 (bianco), usato dal reader per validare l'allineamento |
+| 0 | sync marker | sempre 16.777.215 (R=G=B=255, bianco), usato dal reader per validare l'allineamento |
 | 1 | heartbeat | contatore 0-255 che avanza a ogni update, indica dati "vivi" |
 | 2 | stance | 0=nessuna, 1=Battle, 2=Berserker, 3=Defensive |
 | 3 | in combattimento | 0/1 |

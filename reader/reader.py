@@ -34,19 +34,25 @@ def parse_args():
     return p.parse_args()
 
 
-def read_row(sct, region):
+def read_pixels(sct, region):
+    """Ritorna (values, sync_rgb): values e' la lista di 17 interi decodificati (uno per pixel,
+    formula R*65536+G*256+B), sync_rgb e' la tripla (r,g,b) grezza del pixel di sync (indice 0),
+    usata per il controllo di allineamento canale per canale."""
     shot = sct.grab(region)
     width = shot.width
     rgb = shot.rgb  # bytes, 3 per pixel (R,G,B), gia' riordinati da mss
 
     values = []
+    sync_rgb = None
     for i in range(protocol.NUM_SQUARES):
         cx = i * protocol.SQUARE_SIZE + protocol.SQUARE_SIZE // 2
         cy = protocol.SQUARE_SIZE // 2
         idx = (cy * width + cx) * 3
-        r = rgb[idx]  # l'addon scrive R=G=B (scala di grigi): un solo canale basta
-        values.append(r)
-    return values
+        r, g, b = rgb[idx], rgb[idx + 1], rgb[idx + 2]
+        if i == protocol.SYNC:
+            sync_rgb = (r, g, b)
+        values.append(protocol.rgb_to_value(r, g, b))
+    return values, sync_rgb
 
 
 def format_table(decoded, sync_ok):
@@ -113,8 +119,8 @@ def main():
         stale_since = None
 
         while True:
-            values = read_row(sct, region)
-            sync_ok = protocol.is_sync_valid(values[protocol.SYNC])
+            values, sync_rgb = read_pixels(sct, region)
+            sync_ok = protocol.is_sync_valid(*sync_rgb)
             decoded = protocol.decode(values) if sync_ok else None
 
             clear_screen()
