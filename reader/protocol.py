@@ -5,7 +5,7 @@ cima a quel file per la tabella completa indice -> significato). Nessuna generaz
 se cambi un valore da un lato, cambialo anche qui.
 """
 
-NUM_SQUARES = 17
+NUM_SQUARES = 18
 # 1 pixel fisico per valore - deve combaciare esattamente con SQUARE_SIZE nell'addon Lua. Nessun
 # margine di errore sull'allineamento a questa dimensione: vedi la nota nel README sulla precisione
 # richiesta di --left/--bottom quando SQUARE_SIZE=1.
@@ -28,16 +28,31 @@ RECENT_ATTACKERS = 13
 AUTOATTACK_ACTIVE = 14
 LAST_ACTION_KIND = 15
 LAST_ACTION_ID = 16
+CHECKSUM = 17
+
+# Indici del payload coperto dal checksum (indice 17): somma di values[1:18] modulo
+# CHECKSUM_MODULO, stessa formula e stesso ordine di WRH_Telemetry.lua (UpdateSquares/payload).
+_CHECKSUM_PAYLOAD_START = HEARTBEAT
+_CHECKSUM_PAYLOAD_END = CHECKSUM  # slice esclusivo, quindi copre 1..16
 
 # Ogni pixel porta un intero 0-16777215 (24 bit) spalmato su R (byte alto), G (byte medio),
 # B (byte basso) - value = R*65536 + G*256 + B. Ordine confermato sulla fonte reale della tecnica
 # (Xian55/WowClassicGrindBot, Addons/DataToColor/DataToColor.lua, funzione int()): R e' il byte piu'
 # significativo, non il meno significativo - vedi il commento in testa a WRH_Telemetry.lua.
 MAX_PIXEL_VALUE = 16777215
+CHECKSUM_MODULO = MAX_PIXEL_VALUE + 1
 
 
 def rgb_to_value(r, g, b):
     return (r << 16) | (g << 8) | b
+
+
+def is_checksum_valid(values):
+    """Ricalcola il checksum sugli stessi 16 indici (1-16) coperti dall'addon e lo confronta con
+    values[CHECKSUM]. False = frame incoerente (letto a meta' di un aggiornamento, o corrotto in
+    altro modo) - va scartato dal chiamante, non mostrato."""
+    expected = sum(values[_CHECKSUM_PAYLOAD_START:_CHECKSUM_PAYLOAD_END]) % CHECKSUM_MODULO
+    return expected == values[CHECKSUM]
 
 
 CHANNEL_EXPECTED_VALUE = 255
@@ -92,8 +107,9 @@ ACTION_NAMES = {
 
 
 def decode(values):
-    """values: lista di 17 interi 0-16777215, uno per pixel, gia' decodificati da (R,G,B) con
-    rgb_to_value(). Ritorna un dict con i campi decodificati in forma leggibile. Tutti i campi
+    """values: lista di 18 interi 0-16777215, uno per pixel, gia' decodificati da (R,G,B) con
+    rgb_to_value() (indice 17 e' il checksum, non decodificato qui - vedi is_checksum_valid).
+    Ritorna un dict con i campi decodificati in forma leggibile. Tutti i campi
     attuali stanno entro 0-255 (percentuali, flag, contatori piccoli), quindi la logica sotto
     tratta i valori decodificati come se fossero ancora byte singoli - resta comunque corretta
     anche se in futuro un campo dovesse usare il range piu' ampio."""

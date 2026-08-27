@@ -45,11 +45,17 @@
 -- indice 14 autoattack attivo: 0/1
 -- indice 15 kind ultima azione loggata (solo se One Button Rotation logga): 0=nessuna, 1=stance, 2=spell, 3=attack
 -- indice 16 id ultima azione loggata (vedi ACTION_IDS/STANCE_IDS sotto)
+-- indice 17 checksum: somma degli indici 1-16 modulo 16777216 - il reader la ricalcola dai valori
+--           letti e scarta il frame se non torna (capture a meta' di un aggiornamento: raro, dato
+--           che WoW disegna un intero frame in un colpo solo, ma non impossibile - es. un altro
+--           addon che disegna sopra per un istante, o un frame drop durante la cattura). Il sync
+--           marker (indice 0) copre solo l'allineamento, l'heartbeat (indice 1) solo la vivacita' -
+--           nessuno dei due garantisce da solo che QUESTO frame specifico sia internamente coerente.
 
 WRHT = {}
 WRHT.commands = {}
 
-local NUM_SQUARES = 17
+local NUM_SQUARES = 18
 -- 1 pixel fisico per valore (riga di 17px totali, quasi invisibile). Nessun margine di errore
 -- sull'allineamento: se il reader campiona anche solo 1px fuori posto legge il valore sbagliato
 -- senza errori visibili - va calibrato con precisione (vedi README.md). Con un valore piu' alto
@@ -475,6 +481,10 @@ local function GatherState()
 	}
 end
 
+-- Modulo su cui si calcola il checksum (indice 17) - stesso range rappresentabile da un pixel
+-- (2^24), cosi' il checksum stesso non deve mai essere troncato da ValueToColor.
+local CHECKSUM_MODULO = MAX_PIXEL_VALUE + 1
+
 local function UpdateSquares()
 	heartbeat = heartbeat + 1
 	if heartbeat > 255 then
@@ -483,23 +493,39 @@ local function UpdateSquares()
 
 	local s = GatherState()
 
+	-- Valori agli indici 1-16, nello stesso ordine in cui vengono scritti sotto - il checksum
+	-- all'indice 17 e' la loro somma modulo CHECKSUM_MODULO. reader/protocol.py deve ricalcolarla
+	-- con la stessa formula sugli stessi 16 indici.
+	local payload = {
+		heartbeat,
+		STANCE_IDS[s.stance] or 0,
+		s.inCombat and 1 or 0,
+		s.hasTarget and 1 or 0,
+		s.playerHpPct,
+		s.rage,
+		s.targetHpPct,
+		s.sunder,
+		s.rend,
+		s.demoShout,
+		s.overpowerWindow,
+		s.revengeWindow,
+		s.attackers,
+		s.autoAttack,
+		s.lastKind,
+		s.lastId,
+	}
+
+	local checksum = 0
+	for i = 1, table.getn(payload) do
+		checksum = checksum + payload[i]
+	end
+	checksum = checksum - math.floor(checksum / CHECKSUM_MODULO) * CHECKSUM_MODULO
+
 	SetSquare(0, MAX_PIXEL_VALUE) -- sync marker (bianco puro, R=G=B=255)
-	SetSquare(1, heartbeat)
-	SetSquare(2, STANCE_IDS[s.stance] or 0)
-	SetSquare(3, s.inCombat and 1 or 0)
-	SetSquare(4, s.hasTarget and 1 or 0)
-	SetSquare(5, s.playerHpPct)
-	SetSquare(6, s.rage)
-	SetSquare(7, s.targetHpPct)
-	SetSquare(8, s.sunder)
-	SetSquare(9, s.rend)
-	SetSquare(10, s.demoShout)
-	SetSquare(11, s.overpowerWindow)
-	SetSquare(12, s.revengeWindow)
-	SetSquare(13, s.attackers)
-	SetSquare(14, s.autoAttack)
-	SetSquare(15, s.lastKind)
-	SetSquare(16, s.lastId)
+	for i = 1, table.getn(payload) do
+		SetSquare(i, payload[i])
+	end
+	SetSquare(17, checksum)
 end
 
 local elapsed = 0

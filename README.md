@@ -87,9 +87,19 @@ segnala se lo `heartbeat` smette di avanzare (addon fermo: reload, logout, gioco
 
 ## Protocollo
 
-17 pixel fisici in fila da sinistra a destra (1 pixel = 1 valore, riga alta 1px, larga 17px in
+18 pixel fisici in fila da sinistra a destra (1 pixel = 1 valore, riga alta 1px, larga 18px in
 totale — quasi invisibile). Nessun margine di errore sull'allineamento a questa dimensione: vedi
 "Calibrazione" sotto.
+
+**Due livelli di controllo separati**, nessuno dei due copre da solo la validità di un frame:
+- **pixel 0 (sync)** verifica l'*allineamento* — il reader sta puntando al punto giusto?
+- **pixel 17 (checksum)** verifica la *coerenza* — questo frame specifico è internamente
+  consistente, o è stato catturato a metà di un aggiornamento (raro, dato che WoW disegna un intero
+  frame in un colpo solo, ma non impossibile)? È la somma dei valori agli indici 1-16 modulo
+  16.777.216; il reader la ricalcola dai pixel letti e, se non torna, scarta quel frame e continua a
+  mostrare l'ultimo valido invece di dati incoerenti.
+- il **pixel 1 (heartbeat)** resta il terzo controllo, per la *vivacità* — l'addon sta ancora
+  aggiornando, o è fermo (reload/logout/pausa)?
 
 Ogni pixel porta un intero **0-16.777.215** (24 bit) spalmato sui tre canali: `valore = R*65536 +
 G*256 + B` (R = byte più significativo, G = medio, B = meno significativo). Ordine verificato sulla
@@ -121,6 +131,7 @@ vanno mantenute sincronizzate a mano, non c'è generazione automatica.
 | 14 | autoattack attivo | 0/1 |
 | 15 | kind ultima azione loggata | 0=nessuna, 1=stance, 2=spell, 3=attack |
 | 16 | id ultima azione loggata | vedi `ACTION_NAMES`/`STANCE_NAMES` in `reader/protocol.py` |
+| 17 | checksum | somma degli indici 1-16 modulo 16.777.216 — vedi sopra |
 
 ## Comandi in game
 

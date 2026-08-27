@@ -35,9 +35,10 @@ def parse_args():
 
 
 def read_pixels(sct, region):
-    """Ritorna (values, sync_rgb): values e' la lista di 17 interi decodificati (uno per pixel,
-    formula R*65536+G*256+B), sync_rgb e' la tripla (r,g,b) grezza del pixel di sync (indice 0),
-    usata per il controllo di allineamento canale per canale."""
+    """Ritorna (values, sync_rgb): values e' la lista di 18 interi decodificati (uno per pixel,
+    formula R*65536+G*256+B - l'ultimo e' il checksum, non ancora verificato qui), sync_rgb e' la
+    tripla (r,g,b) grezza del pixel di sync (indice 0), usata per il controllo di allineamento
+    canale per canale."""
     shot = sct.grab(region)
     width = shot.width
     rgb = shot.rgb  # bytes, 3 per pixel (R,G,B), gia' riordinati da mss
@@ -55,7 +56,7 @@ def read_pixels(sct, region):
     return values, sync_rgb
 
 
-def format_table(decoded, sync_ok):
+def format_table(decoded, sync_ok, checksum_note=None):
     lines = []
     lines.append("=" * 46)
     if not sync_ok:
@@ -64,7 +65,12 @@ def format_table(decoded, sync_ok):
         lines.append(" verifica --left/--bottom con /wrht calibrate in game")
         return "\n".join(lines)
 
-    lines.append(" WRH TELEMETRY")
+    if decoded is None:
+        lines.append(" WRH TELEMETRY  in attesa di un frame coerente...")
+        lines.append("=" * 46)
+        return "\n".join(lines)
+
+    lines.append(" WRH TELEMETRY" + (" " + checksum_note if checksum_note else ""))
     lines.append("=" * 46)
     rows = [
         ("Stance", decoded["stance"]),
@@ -115,26 +121,35 @@ def main():
             "height": protocol.SQUARE_SIZE,
         }
 
+        last_decoded = None  # ultimo frame VALIDO (sync ok + checksum ok) mostrato
         last_heartbeat = None
         stale_since = None
 
         while True:
             values, sync_rgb = read_pixels(sct, region)
             sync_ok = protocol.is_sync_valid(*sync_rgb)
-            decoded = protocol.decode(values) if sync_ok else None
-
-            clear_screen()
-            print(format_table(decoded, sync_ok))
+            checksum_note = None
 
             if sync_ok:
-                if decoded["heartbeat"] == last_heartbeat:
+                if protocol.is_checksum_valid(values):
+                    last_decoded = protocol.decode(values)
+                else:
+                    # Frame letto a meta' di un aggiornamento (o corrotto in altro modo): si scarta
+                    # e si continua a mostrare l'ultimo frame valido, invece di dati incoerenti.
+                    checksum_note = "[!] frame incoerente ignorato, mostro l'ultimo valido"
+
+            clear_screen()
+            print(format_table(last_decoded, sync_ok, checksum_note))
+
+            if sync_ok and last_decoded is not None:
+                if last_decoded["heartbeat"] == last_heartbeat:
                     if stale_since is None:
                         stale_since = time.time()
                     elif time.time() - stale_since > 3:
                         print(" [!] heartbeat fermo da oltre 3s: /reload, logout o gioco in pausa?")
                 else:
                     stale_since = None
-                last_heartbeat = decoded["heartbeat"]
+                last_heartbeat = last_decoded["heartbeat"]
 
             if args.once:
                 return
