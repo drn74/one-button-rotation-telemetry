@@ -22,6 +22,7 @@ import time
 import mss
 
 import protocol
+import rotation
 
 
 def parse_args():
@@ -35,7 +36,7 @@ def parse_args():
 
 
 def read_pixels(sct, region):
-    """Ritorna (values, sync_rgb): values e' la lista di 18 interi decodificati (uno per pixel,
+    """Ritorna (values, sync_rgb): values e' la lista di 21 interi decodificati (uno per pixel,
     formula R*65536+G*256+B - l'ultimo e' il checksum, non ancora verificato qui), sync_rgb e' la
     tripla (r,g,b) grezza del pixel di sync (indice 0), usata per il controllo di allineamento
     canale per canale."""
@@ -72,6 +73,12 @@ def format_table(decoded, sync_ok, checksum_note=None):
 
     lines.append(" WRH TELEMETRY" + (" " + checksum_note if checksum_note else ""))
     lines.append("=" * 46)
+
+    recommended = rotation.get_next_action(decoded)
+    recommended_name = recommended["name"] if recommended else "-"
+    lines.append(" >> PROSSIMA AZIONE: %s" % recommended_name)
+    lines.append("=" * 46)
+
     rows = [
         ("Stance", decoded["stance"]),
         ("In combattimento", "si" if decoded["in_combat"] else "no"),
@@ -86,7 +93,7 @@ def format_table(decoded, sync_ok, checksum_note=None):
         ("Finestra Revenge", "aperta" if decoded["revenge_window"] else "-"),
         ("Attaccanti recenti", str(decoded["recent_attackers"])),
         ("Autoattack", "attivo" if decoded["autoattack_active"] else "fermo"),
-        ("Ultima azione", decoded["last_action_name"]),
+        ("Ultima azione (log opzionale)", decoded["last_action_name"]),
     ]
     label_width = max(len(r[0]) for r in rows)
     for label, value in rows:

@@ -28,8 +28,11 @@ visualizzazione descritto sopra. Nessun codice di automazione di quel progetto �
 ## Struttura del repository
 
 ```
-Addon/WRH_Telemetry/     addon WoW 1.12.1, indipendente: legge da solo lo stato e disegna i quadratini
-reader/                  script Python che li legge e stampa una tabella in console
+Addon/WRH_Telemetry/     addon WoW 1.12.1, indipendente: legge da solo lo stato e disegna i pixel
+reader/protocol.py       decodifica dei pixel in valori (nessuna logica di rotazione)
+reader/rotation.py       replica in Python della priority list di Rotation.lua - calcolo puro,
+                          nessuna connessione al gioco - per mostrare "cosa consiglierebbe l'addon"
+reader/reader.py         cattura schermo, chiama protocol+rotation, stampa la tabella in console
 ```
 
 ## Installazione dell'addon
@@ -85,17 +88,36 @@ python reader.py --left 0 --bottom 1080
 Il reader ristampa la tabella ogni `--interval` secondi (default 0.2, come l'update dell'addon) e
 segnala se lo `heartbeat` smette di avanzare (addon fermo: reload, logout, gioco in pausa/minimizzato).
 
+## Prossima azione consigliata
+
+`reader/rotation.py` reimplementa l'ordine esatto della priority list di `Rotation.lua`
+(`GetNextAction`) come **puro calcolo su numeri già ricevuti** — nessuna connessione al gioco, nessun
+input simulato, solo testo mostrato in console (riga `>> PROSSIMA AZIONE: ...`). L'addon calcola due
+bitmask (pixel 18-19, `known_mask`/`ready_mask`) leggendo cooldown e costo in rage di ogni abilità
+dal tooltip (stessa tecnica di sola lettura di `Rotation.lua`, `IsSpellCastableNow`) — il reader le
+usa per sapere quali abilità sono conosciute/castabili ORA, senza doverle interrogare da solo.
+
+La fedeltà rispetto all'originale è completa: stessa sequenza di priorità, comprese le sottigliezze
+(es. la scelta Cleave/Heroic Strike è fatta una volta sola come nell'originale, senza fallback
+all'altra se quella scelta non è castabile). L'unica assunzione: la funzione valuta sempre "cosa
+faresti restando nella stance attuale" — non predice mai uno switch di stance, perché nell'addon
+originale quella scelta spetta al giocatore (quale macro premere), non alla priority list.
+
+Va tenuto sincronizzato a mano con `Rotation.lua` nel repo
+[one-button-rotation](../one-button-rotation): se la priority list cambia lì, va aggiornata anche
+qui.
+
 ## Protocollo
 
-18 pixel fisici in fila da sinistra a destra (1 pixel = 1 valore, riga alta 1px, larga 18px in
+21 pixel fisici in fila da sinistra a destra (1 pixel = 1 valore, riga alta 1px, larga 21px in
 totale — quasi invisibile). Nessun margine di errore sull'allineamento a questa dimensione: vedi
 "Calibrazione" sotto.
 
-**Due livelli di controllo separati**, nessuno dei due copre da solo la validità di un frame:
+**Tre livelli di controllo separati**, nessuno copre da solo la validità di un frame:
 - **pixel 0 (sync)** verifica l'*allineamento* — il reader sta puntando al punto giusto?
-- **pixel 17 (checksum)** verifica la *coerenza* — questo frame specifico è internamente
+- **pixel 20 (checksum)** verifica la *coerenza* — questo frame specifico è internamente
   consistente, o è stato catturato a metà di un aggiornamento (raro, dato che WoW disegna un intero
-  frame in un colpo solo, ma non impossibile)? È la somma dei valori agli indici 1-16 modulo
+  frame in un colpo solo, ma non impossibile)? È la somma dei valori agli indici 1-19 modulo
   16.777.216; il reader la ricalcola dai pixel letti e, se non torna, scarta quel frame e continua a
   mostrare l'ultimo valido invece di dati incoerenti.
 - il **pixel 1 (heartbeat)** resta il terzo controllo, per la *vivacità* — l'addon sta ancora
@@ -131,7 +153,10 @@ vanno mantenute sincronizzate a mano, non c'è generazione automatica.
 | 14 | autoattack attivo | 0/1 |
 | 15 | kind ultima azione loggata | 0=nessuna, 1=stance, 2=spell, 3=attack |
 | 16 | id ultima azione loggata | vedi `ACTION_NAMES`/`STANCE_NAMES` in `reader/protocol.py` |
-| 17 | checksum | somma degli indici 1-16 modulo 16.777.216 — vedi sopra |
+| 17 | target sta attaccando qualcun altro (per Taunt) | 0/1 |
+| 18 | known_mask | bitmask spell conosciute, 1 bit per abilità (bit per id N = 2^(N-1), vedi `ACTION_IDS`) |
+| 19 | ready_mask | bitmask spell castabili ORA (cooldown pronto + rage sufficiente), stessi bit di known_mask |
+| 20 | checksum | somma degli indici 1-19 modulo 16.777.216 — vedi sopra |
 
 ## Comandi in game
 
@@ -147,10 +172,13 @@ vanno mantenute sincronizzate a mano, non c'è generazione automatica.
   testo esatto dei messaggi di combat log per Overpower/Revenge/multi-target) va confermata a
   schermo prima di fidarsene — usa `/wrht status` come primo test (non richiede il reader Python),
   poi `/wrht calibrate` + una lettura `--once` del reader per il canale pixel.
-- Il campo "ultima azione" riflette l'ultimo click reale solo se `One_Button_Rotation` è installato
-  E il suo `/wrh startlog` è attivo — scelta deliberata per non duplicare qui l'intera logica di
-  decisione della rotazione (che tra l'altro ha un side-effect reale, avvia l'autoattack: non va
-  richiamata da un addon di sola telemetria).
+- Il campo "ultima azione (log opzionale)" riflette l'ultimo click reale solo se
+  `One_Button_Rotation` è installato E il suo `/wrh startlog` è attivo — indipendente dalla riga
+  "PROSSIMA AZIONE" (quella è sempre calcolata, non richiede l'altro addon).
+- "PROSSIMA AZIONE" dipende da `known_mask`/`ready_mask` (pixel 18-19), calcolate in Lua con lo
+  stesso scan tooltip di `Rotation.lua` (`GetSpellCooldown` + parsing `"(%d+) Rage"`) — mai
+  verificato in game per QUESTO addon (solo per l'originale, in un contesto diverso): va confermato
+  con `/wrht status` (mostra `knownMask`/`readyMask` come numeri) prima di fidarsene per lo stream.
 - Risoluzioni/scaling non standard (es. scaling del sistema operativo diverso da 100%) possono
   disallineare la cattura pixel-perfect: se il sync marker non si allinea, prova prima a impostare lo
   scaling del sistema al 100% per il display usato da WoW.

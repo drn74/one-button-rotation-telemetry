@@ -45,7 +45,14 @@
 -- indice 14 autoattack attivo: 0/1
 -- indice 15 kind ultima azione loggata (solo se One Button Rotation logga): 0=nessuna, 1=stance, 2=spell, 3=attack
 -- indice 16 id ultima azione loggata (vedi ACTION_IDS/STANCE_IDS sotto)
--- indice 17 checksum: somma degli indici 1-16 modulo 16777216 - il reader la ricalcola dai valori
+-- indice 17 target sta attaccando qualcun altro (per Taunt): 0/1
+-- indice 18 knownMask: bitmask spell conosciute, un bit per abilita' (bit per id N = 2^(N-1),
+--           stessa numerazione di ACTION_IDS - id 1-4 = Auto Attack/stance, mai impostati qui)
+-- indice 19 readyMask: bitmask spell castabili ORA (cooldown pronto + rage sufficiente), stessi bit
+--           di knownMask - usate dal reader Python (reader/rotation.py) per calcolare "quale
+--           azione sceglierebbe la priority list dell'addon originale ORA", senza eseguire nulla
+--           in game: e' solo un calcolo su numeri gia' ricevuti, mostrato come testo in console.
+-- indice 20 checksum: somma degli indici 1-19 modulo 16777216 - il reader la ricalcola dai valori
 --           letti e scarta il frame se non torna (capture a meta' di un aggiornamento: raro, dato
 --           che WoW disegna un intero frame in un colpo solo, ma non impossibile - es. un altro
 --           addon che disegna sopra per un istante, o un frame drop durante la cattura). Il sync
@@ -55,8 +62,8 @@
 WRHT = {}
 WRHT.commands = {}
 
-local NUM_SQUARES = 18
--- 1 pixel fisico per valore (riga di 17px totali, quasi invisibile). Nessun margine di errore
+local NUM_SQUARES = 21
+-- 1 pixel fisico per valore (riga di 21px totali, quasi invisibile). Nessun margine di errore
 -- sull'allineamento: se il reader campiona anche solo 1px fuori posto legge il valore sbagliato
 -- senza errori visibili - va calibrato con precisione (vedi README.md). Con un valore piu' alto
 -- (es. 4) il reader campiona il pixel centrale di ogni blocco, tollerando piccoli errori di
@@ -100,6 +107,15 @@ local ACTION_IDS = {
 	["Cleave"] = 19,
 	["Demoralizing Shout"] = 20,
 }
+
+-- Inversa di ACTION_IDS (id -> nome), costruita una volta sola - serve a ComputeSpellMasks sotto
+-- per sapere quale nome di spell corrisponde a ciascun bit (bit per id N = 2^(N-1)). Gli id 1-4
+-- (Auto Attack/le tre stance) non sono vere spell, restano semplicemente senza bit impostato nelle
+-- maschere - ComputeSpellMasks li salta esplicitamente.
+local ACTION_NAMES_BY_ID = {}
+for name, id in pairs(ACTION_IDS) do
+	ACTION_NAMES_BY_ID[id] = name
+end
 
 --------------------------------------------------------------------------------
 -- Spellbook scan (copia minimale di SpellbookScan.lua di One Button Rotation) -
@@ -201,6 +217,89 @@ end
 
 local function HasAttackableTarget()
 	return UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDead("target")
+end
+
+-- Serve solo a Taunt (Defensive/Tank): il target attuale sta attaccando qualcun altro? Copia di
+-- IsTargetAttackingSomeoneElse da Rotation.lua - stesso limite gia' documentato nel progetto
+-- principale: il token "targettarget" non e' ancora stato verificato in game su questo server, se
+-- non supportato questa funzione ritorna semplicemente false (degrado sicuro).
+local function IsTargetAttackingSomeoneElse()
+	return UnitExists("targettarget") and not UnitIsUnit("targettarget", "player")
+end
+
+--------------------------------------------------------------------------------
+-- Castabilita' (copia di GetSpellRageCost/IsSpellReady/IsSpellCastableNow da Rotation.lua): serve
+-- a calcolare, per ogni abilita' rilevante alla rotazione, se e' conosciuta e se e' castabile ORA
+-- (cooldown pronto + rage sufficiente). Sola lettura: GetSpellCooldown e il tooltip scan non hanno
+-- alcun effetto di gioco, esattamente come nel progetto principale - IsUsableSpell non esiste in
+-- 1.12.1, il costo in rage va letto dal tooltip.
+--------------------------------------------------------------------------------
+
+local scanTooltip = CreateFrame("GameTooltip", "WRHT_ScanTooltip", nil, "GameTooltipTemplate")
+scanTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+
+local function GetSpellRageCost(index)
+	scanTooltip:ClearLines()
+	scanTooltip:SetSpell(index, "spell")
+
+	for i = 2, scanTooltip:NumLines() do
+		local line = getglobal("WRHT_ScanTooltipTextLeft" .. i)
+		local text = line and line:GetText()
+		if text then
+			local _, _, cost = string.find(text, "(%d+) Rage")
+			if cost then
+				return tonumber(cost)
+			end
+		end
+	end
+
+	return 0
+end
+
+local function IsSpellReady(index)
+	local start, duration = GetSpellCooldown(index, "spell")
+	if not start or start == 0 then
+		return true
+	end
+	return GetTime() > start + duration
+end
+
+local function IsSpellCastableNow(name)
+	local index = spellIndex[name]
+	if not index then
+		return false
+	end
+	if not IsSpellReady(index) then
+		return false
+	end
+
+	local rageCost = GetSpellRageCost(index)
+	local currentRage = UnitMana("player")
+	return currentRage >= rageCost
+end
+
+-- Calcola le due bitmask (conosciute/pronte ORA) su tutte le vere spell della rotazione (id 5-20,
+-- id 1-4 sono Auto Attack/stance, saltati). Un bit per spell, bit per id N = 2^(N-1) - stessa
+-- numerazione di ACTION_IDS, cosi' il lato Python puo' decodificarle senza una tabella separata.
+-- Il reader Python usa queste maschere per replicare l'ordine della priority list di
+-- Rotation.lua/GetNextAction SENZA eseguire nulla in game (e' solo testo mostrato in console) -
+-- vedi reader/rotation.py.
+local function ComputeSpellMasks()
+	local known, ready = 0, 0
+	local bitValue = 1
+	for id = 1, 20 do
+		local name = ACTION_NAMES_BY_ID[id]
+		if name and id >= 5 then
+			if spellIndex[name] then
+				known = known + bitValue
+				if IsSpellCastableNow(name) then
+					ready = ready + bitValue
+				end
+			end
+		end
+		bitValue = bitValue * 2
+	end
+	return known, ready
 end
 
 --------------------------------------------------------------------------------
@@ -448,6 +547,8 @@ local function GatherState()
 	end
 
 	local autoAttack = autoAttackActive and 1 or 0
+	local targetAttackingElse = (targetExists and IsTargetAttackingSomeoneElse()) and 1 or 0
+	local knownMask, readyMask = ComputeSpellMasks()
 
 	local lastKind, lastId, lastName = 0, 0, nil
 	local lastEntry = GetLastLoggedAction()
@@ -475,6 +576,9 @@ local function GatherState()
 		revengeWindow = revengeWindow,
 		attackers = attackers,
 		autoAttack = autoAttack,
+		targetAttackingElse = targetAttackingElse,
+		knownMask = knownMask,
+		readyMask = readyMask,
 		lastKind = lastKind,
 		lastId = lastId,
 		lastName = lastName,
@@ -493,9 +597,9 @@ local function UpdateSquares()
 
 	local s = GatherState()
 
-	-- Valori agli indici 1-16, nello stesso ordine in cui vengono scritti sotto - il checksum
-	-- all'indice 17 e' la loro somma modulo CHECKSUM_MODULO. reader/protocol.py deve ricalcolarla
-	-- con la stessa formula sugli stessi 16 indici.
+	-- Valori agli indici 1-19, nello stesso ordine in cui vengono scritti sotto - il checksum
+	-- all'indice 20 e' la loro somma modulo CHECKSUM_MODULO. reader/protocol.py deve ricalcolarla
+	-- con la stessa formula sugli stessi 19 indici.
 	local payload = {
 		heartbeat,
 		STANCE_IDS[s.stance] or 0,
@@ -513,6 +617,9 @@ local function UpdateSquares()
 		s.autoAttack,
 		s.lastKind,
 		s.lastId,
+		s.targetAttackingElse,
+		s.knownMask,
+		s.readyMask,
 	}
 
 	local checksum = 0
@@ -525,7 +632,7 @@ local function UpdateSquares()
 	for i = 1, table.getn(payload) do
 		SetSquare(i, payload[i])
 	end
-	SetSquare(17, checksum)
+	SetSquare(20, checksum)
 end
 
 local elapsed = 0
@@ -577,6 +684,7 @@ WRHT.commands["status"] = function()
 		table.insert(parts, "sunder=" .. s.sunder .. "/5")
 		table.insert(parts, "rend=" .. tostring(s.rend == 1))
 		table.insert(parts, "demoshout=" .. tostring(s.demoShout == 1))
+		table.insert(parts, "target attacca altri=" .. tostring(s.targetAttackingElse == 1))
 	else
 		table.insert(parts, "nessun target")
 	end
@@ -584,7 +692,8 @@ WRHT.commands["status"] = function()
 	table.insert(parts, "revenge window=" .. tostring(s.revengeWindow == 1))
 	table.insert(parts, "attaccanti recenti=" .. s.attackers)
 	table.insert(parts, "autoattack=" .. tostring(s.autoAttack == 1))
-	table.insert(parts, "ultima azione=" .. (s.lastName or "n/d (WRH_DebugLogDB assente o /wrh startlog non attivo)"))
+	table.insert(parts, "knownMask=" .. s.knownMask .. " readyMask=" .. s.readyMask)
+	table.insert(parts, "ultima azione (log opzionale)=" .. (s.lastName or "n/d (WRH_DebugLogDB assente o /wrh startlog non attivo)"))
 
 	DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99WRHT:|r " .. table.concat(parts, ", "))
 end

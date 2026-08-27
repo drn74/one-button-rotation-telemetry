@@ -5,7 +5,7 @@ cima a quel file per la tabella completa indice -> significato). Nessuna generaz
 se cambi un valore da un lato, cambialo anche qui.
 """
 
-NUM_SQUARES = 18
+NUM_SQUARES = 21
 # 1 pixel fisico per valore - deve combaciare esattamente con SQUARE_SIZE nell'addon Lua. Nessun
 # margine di errore sull'allineamento a questa dimensione: vedi la nota nel README sulla precisione
 # richiesta di --left/--bottom quando SQUARE_SIZE=1.
@@ -28,12 +28,15 @@ RECENT_ATTACKERS = 13
 AUTOATTACK_ACTIVE = 14
 LAST_ACTION_KIND = 15
 LAST_ACTION_ID = 16
-CHECKSUM = 17
+TARGET_ATTACKING_ELSE = 17
+KNOWN_MASK = 18
+READY_MASK = 19
+CHECKSUM = 20
 
-# Indici del payload coperto dal checksum (indice 17): somma di values[1:18] modulo
+# Indici del payload coperto dal checksum (indice 20): somma di values[1:20] modulo
 # CHECKSUM_MODULO, stessa formula e stesso ordine di WRH_Telemetry.lua (UpdateSquares/payload).
 _CHECKSUM_PAYLOAD_START = HEARTBEAT
-_CHECKSUM_PAYLOAD_END = CHECKSUM  # slice esclusivo, quindi copre 1..16
+_CHECKSUM_PAYLOAD_END = CHECKSUM  # slice esclusivo, quindi copre 1..19
 
 # Ogni pixel porta un intero 0-16777215 (24 bit) spalmato su R (byte alto), G (byte medio),
 # B (byte basso) - value = R*65536 + G*256 + B. Ordine confermato sulla fonte reale della tecnica
@@ -48,7 +51,7 @@ def rgb_to_value(r, g, b):
 
 
 def is_checksum_valid(values):
-    """Ricalcola il checksum sugli stessi 16 indici (1-16) coperti dall'addon e lo confronta con
+    """Ricalcola il checksum sugli stessi 19 indici (1-19) coperti dall'addon e lo confronta con
     values[CHECKSUM]. False = frame incoerente (letto a meta' di un aggiornamento, o corrotto in
     altro modo) - va scartato dal chiamante, non mostrato."""
     expected = sum(values[_CHECKSUM_PAYLOAD_START:_CHECKSUM_PAYLOAD_END]) % CHECKSUM_MODULO
@@ -105,17 +108,29 @@ ACTION_NAMES = {
     20: "Demoralizing Shout",
 }
 
+# Inversa di ACTION_NAMES (nome -> id) - usata da rotation.py per calcolare la posizione del bit
+# di ciascuna spell in KNOWN_MASK/READY_MASK (bit per id N = 2^(N-1)), stessa numerazione lato Lua
+# (WRH_Telemetry.lua, ACTION_IDS/ComputeSpellMasks).
+ACTION_IDS = {name: id_ for id_, name in ACTION_NAMES.items() if id_ != 0}
+
 
 def decode(values):
-    """values: lista di 18 interi 0-16777215, uno per pixel, gia' decodificati da (R,G,B) con
-    rgb_to_value() (indice 17 e' il checksum, non decodificato qui - vedi is_checksum_valid).
-    Ritorna un dict con i campi decodificati in forma leggibile. Tutti i campi
-    attuali stanno entro 0-255 (percentuali, flag, contatori piccoli), quindi la logica sotto
-    tratta i valori decodificati come se fossero ancora byte singoli - resta comunque corretta
-    anche se in futuro un campo dovesse usare il range piu' ampio."""
+    """values: lista di 21 interi 0-16777215, uno per pixel, gia' decodificati da (R,G,B) con
+    rgb_to_value() (indice 20 e' il checksum, non decodificato qui - vedi is_checksum_valid).
+    Ritorna un dict con i campi decodificati in forma leggibile, incluse le bitmask grezze
+    known_mask/ready_mask (per rotation.get_next_action - non c'e' bisogno di decodificarle qui,
+    sono gia' bitmask). Tutti gli altri campi stanno entro 0-255 (percentuali, flag, contatori
+    piccoli), quindi la logica sotto tratta i valori decodificati come se fossero ancora byte
+    singoli - resta comunque corretta anche se in futuro un campo dovesse usare il range piu'
+    ampio."""
 
     def flag(i):
-        return values[i] >= 128
+        # L'addon scrive i booleani come 1/0 letterali (vedi WRH_Telemetry.lua, es.
+        # "s.inCombat and 1 or 0") - NON come 255/0 - quindi qualunque valore diverso da zero e'
+        # vero. Una soglia tipo >=128 (bug reale, catturato da un test end-to-end: leggeva sempre
+        # False per ogni campo booleano) sarebbe corretta solo se l'addon scrivesse 255 per "vero",
+        # cosa che non fa.
+        return values[i] != 0
 
     last_kind_id = values[LAST_ACTION_KIND]
     last_action_id = values[LAST_ACTION_ID]
@@ -139,6 +154,9 @@ def decode(values):
         "revenge_window": flag(REVENGE_WINDOW),
         "recent_attackers": values[RECENT_ATTACKERS],
         "autoattack_active": flag(AUTOATTACK_ACTIVE),
+        "target_attacking_someone_else": flag(TARGET_ATTACKING_ELSE),
+        "known_mask": values[KNOWN_MASK],
+        "ready_mask": values[READY_MASK],
         "last_action_kind": ACTION_KIND_NAMES.get(last_kind_id, "?"),
         "last_action_name": last_action_name if last_kind_id != 0 else "-",
     }
