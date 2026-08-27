@@ -1,14 +1,16 @@
--- WRH Telemetry: legge lo stato gia' esposto (sola lettura) dall'addon One Button Rotation (WRH)
--- e lo codifica in una fila di quadratini colorati ancorati in basso a sinistra dello schermo, cosi'
--- un programma esterno (screen-capture) puo' leggerlo e mostrarlo in una tabella durante lo
--- streaming. Addon separato e indipendente: non modifica ne' dipende dal caricamento di
--- One_Button_Rotation (OptionalDeps nel .toc), degrada in sicurezza (tutto a zero) se non presente.
+-- WRH Telemetry: addon INDIPENDENTE (non richiede One Button Rotation) per WoW 1.12.1, Fury
+-- Warrior. Legge da solo lo stato del personaggio - stance, rage, HP, stack di Sunder Armor, ecc. -
+-- con le stesse tecniche gia' verificate nel progetto One Button Rotation (vedi CLAUDE.md di quel
+-- repo), e lo codifica in una fila di quadratini colorati ancorati in basso a sinistra dello
+-- schermo, cosi' un programma esterno (screen-capture) puo' leggerlo e mostrarlo in una tabella
+-- durante lo streaming.
 --
--- Nessuna azione di gioco: non chiama mai WRH.GetNextAction() (ha un side-effect reale, avvia
--- l'autoattack) ne' CastSpellByName/AttackTarget/CastShapeshiftForm. Legge solo getter puri gia'
--- esposti da Rotation.lua/StanceCheck.lua, piu' l'ultima entry di WRH_DebugLogDB (SavedVariables di
--- DebugLog.lua, gia' scritta dai click reali dell'utente) per il campo "ultima azione" - per questo
--- quel campo resta a 0/nessuna finche' l'utente non attiva /wrh startlog nell'addon principale.
+-- Sola lettura, sempre: nessuna funzione qui dentro lancia una spell, switcha stance, attacca o
+-- preme alcun tasto - solo GetXxx/UnitXxx e parsing testuale del combat log in entrata. L'unica
+-- eccezione "morbida" e' il campo "ultima azione": se One Button Rotation E' installato E il suo
+-- /wrh startlog e' attivo, viene letto (sola lettura di una SavedVariable) da WRH_DebugLogDB per
+-- mostrare l'ultima azione REALMENTE eseguita da quell'addon - se assente, il campo resta vuoto,
+-- il resto della telemetria funziona comunque.
 --
 -- Protocollo (vedi anche README.md nel repo, e reader/protocol.py sul lato Python - le due liste
 -- DEVONO restare sincronizzate a mano, non c'e' generazione automatica):
@@ -28,10 +30,11 @@
 -- indice 12 finestra Revenge aperta: 0/1
 -- indice 13 attaccanti recenti (euristica multi-target): 0-99
 -- indice 14 autoattack attivo: 0/1
--- indice 15 kind ultima azione loggata: 0=nessuna, 1=stance, 2=spell, 3=attack
+-- indice 15 kind ultima azione loggata (solo se One Button Rotation logga): 0=nessuna, 1=stance, 2=spell, 3=attack
 -- indice 16 id ultima azione loggata (vedi ACTION_IDS/STANCE_IDS sotto)
 
 WRHT = {}
+WRHT.commands = {}
 
 local NUM_SQUARES = 17
 local SQUARE_SIZE = 4 -- pixel fisici per lato di ogni quadratino
@@ -72,6 +75,246 @@ local ACTION_IDS = {
 	["Cleave"] = 19,
 	["Demoralizing Shout"] = 20,
 }
+
+--------------------------------------------------------------------------------
+-- Spellbook scan (copia minimale di SpellbookScan.lua di One Button Rotation) -
+-- serve solo a risolvere nome spell -> texture, per riconoscere i debuff Sunder
+-- Armor/Rend/Demoralizing Shout sul target via UnitDebuff (che ritorna solo la
+-- texture dell'icona, mai il nome - stesso limite gia' documentato nel progetto
+-- principale).
+--------------------------------------------------------------------------------
+
+local spellIndex = {}
+
+local function ScanSpellbook()
+	local index = {}
+	local numTabs = GetNumSpellTabs()
+
+	for tab = 1, numTabs do
+		local _, _, offset, numSpells = GetSpellTabInfo(tab)
+		for i = offset + 1, offset + numSpells do
+			local spellName = GetSpellName(i, BOOKTYPE_SPELL)
+			if spellName then
+				index[spellName] = i
+			end
+		end
+	end
+
+	spellIndex = index
+end
+
+local spellbookFrame = CreateFrame("Frame", "WRHT_SpellbookFrame")
+spellbookFrame:RegisterEvent("PLAYER_LOGIN")
+spellbookFrame:RegisterEvent("LEARNED_SPELL_IN_TAB")
+spellbookFrame:RegisterEvent("SPELLS_CHANGED")
+spellbookFrame:SetScript("OnEvent", ScanSpellbook)
+ScanSpellbook() -- scansione immediata al caricamento (utile su /reload mentre gia' in game)
+
+local function GetSpellTextureByName(name)
+	local index = spellIndex[name]
+	if not index then
+		return nil
+	end
+	return GetSpellTexture(index, "spell")
+end
+
+--------------------------------------------------------------------------------
+-- Debuff/stack sul target (copia di ScanTargetDebuff/GetSunderArmorStacks/
+-- IsRendAppliedOnTarget/IsDemoralizingShoutAppliedOnTarget da Rotation.lua).
+--------------------------------------------------------------------------------
+
+local function ScanTargetDebuff(spellName)
+	local targetTexture = GetSpellTextureByName(spellName)
+	if not targetTexture then
+		return false, 0
+	end
+
+	for i = 1, 16 do
+		local texture, stack = UnitDebuff("target", i)
+		if not texture then
+			break
+		end
+		if texture == targetTexture then
+			return true, stack or 1
+		end
+	end
+
+	return false, 0
+end
+
+local function GetSunderArmorStacks()
+	local found, stack = ScanTargetDebuff("Sunder Armor")
+	return found and stack or 0
+end
+
+local function IsRendAppliedOnTarget()
+	return ScanTargetDebuff("Rend")
+end
+
+local function IsDemoralizingShoutAppliedOnTarget()
+	return ScanTargetDebuff("Demoralizing Shout")
+end
+
+--------------------------------------------------------------------------------
+-- Stance (copia di GetCurrentStance da StanceCheck.lua).
+--------------------------------------------------------------------------------
+
+local function GetCurrentStance()
+	local numForms = GetNumShapeshiftForms()
+	for i = 1, numForms do
+		local _, formName, isActive = GetShapeshiftFormInfo(i)
+		if isActive then
+			return formName
+		end
+	end
+	return nil
+end
+
+--------------------------------------------------------------------------------
+-- Target attaccabile (copia di WRH.HasAttackableTarget da Rotation.lua).
+--------------------------------------------------------------------------------
+
+local function HasAttackableTarget()
+	return UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDead("target")
+end
+
+--------------------------------------------------------------------------------
+-- Finestra Overpower (copia della logica in Rotation.lua: 4 secondi dopo una
+-- schivata nemica, rilevata via parsing testuale del combat log - nessuna API
+-- diretta disponibile in 1.12.1).
+--------------------------------------------------------------------------------
+
+local OVERPOWER_WINDOW_SECONDS = 4
+local overpowerReadyUntil = 0
+
+local overpowerFrame = CreateFrame("Frame", "WRHT_OverpowerFrame")
+overpowerFrame:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
+overpowerFrame:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
+overpowerFrame:RegisterEvent("CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF")
+overpowerFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+overpowerFrame:SetScript("OnEvent", function()
+	if event == "PLAYER_TARGET_CHANGED" then
+		overpowerReadyUntil = 0
+		return
+	end
+	if (string.find(arg1, "You attack") and string.find(arg1, "dodges")) or string.find(arg1, "was dodged by") then
+		overpowerReadyUntil = GetTime() + OVERPOWER_WINDOW_SECONDS
+	end
+end)
+
+local function IsOverpowerWindowOpen()
+	return GetTime() < overpowerReadyUntil
+end
+
+--------------------------------------------------------------------------------
+-- Finestra Revenge (copia della logica in Rotation.lua: 4 secondi dopo che IL
+-- GIOCATORE subisce un parry/dodge/block).
+--------------------------------------------------------------------------------
+
+local REVENGE_WINDOW_SECONDS = 4
+local revengeReadyUntil = 0
+
+local revengeFrame = CreateFrame("Frame", "WRHT_RevengeFrame")
+revengeFrame:RegisterEvent("CHAT_MSG_COMBAT_CREATURE_VS_SELF_MISSES")
+revengeFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+revengeFrame:SetScript("OnEvent", function()
+	if event == "PLAYER_TARGET_CHANGED" then
+		revengeReadyUntil = 0
+		return
+	end
+	if string.find(arg1, "You dodge") or string.find(arg1, "You parry") or string.find(arg1, "You block") then
+		revengeReadyUntil = GetTime() + REVENGE_WINDOW_SECONDS
+	end
+end)
+
+local function IsRevengeWindowOpen()
+	return GetTime() < revengeReadyUntil
+end
+
+--------------------------------------------------------------------------------
+-- Attaccanti recenti / euristica multi-target (copia della logica in
+-- Rotation.lua: conta i nomi distinti che hanno colpito il giocatore negli
+-- ultimi 5 secondi, via parsing del combat log - nessun range-scan disponibile
+-- in 1.12.1).
+--------------------------------------------------------------------------------
+
+local MULTI_TARGET_WINDOW_SECONDS = 5
+local recentAttackers = {}
+
+local function RecordAttacker(name)
+	if name and name ~= "" then
+		recentAttackers[name] = GetTime()
+	end
+end
+
+local function CountRecentAttackers()
+	local now = GetTime()
+	local count = 0
+	for name, seenAt in pairs(recentAttackers) do
+		if now - seenAt > MULTI_TARGET_WINDOW_SECONDS then
+			recentAttackers[name] = nil
+		else
+			count = count + 1
+		end
+	end
+	return count
+end
+
+local function ExtractAttackerName(msg, suffix)
+	local pos = string.find(msg, suffix, 1, true)
+	if not pos then
+		return nil
+	end
+	return string.sub(msg, 1, pos - 1)
+end
+
+local multiTargetFrame = CreateFrame("Frame", "WRHT_MultiTargetFrame")
+multiTargetFrame:RegisterEvent("CHAT_MSG_COMBAT_CREATURE_VS_SELF_HITS")
+multiTargetFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+multiTargetFrame:SetScript("OnEvent", function()
+	if event == "PLAYER_REGEN_ENABLED" then
+		recentAttackers = {}
+		return
+	end
+	local name = ExtractAttackerName(arg1, " hits you") or ExtractAttackerName(arg1, " crits you")
+	RecordAttacker(name)
+end)
+
+--------------------------------------------------------------------------------
+-- Autoattack attivo (copia della logica in Rotation.lua: eventi nativi dedicati
+-- PLAYER_ENTER_COMBAT/PLAYER_LEAVE_COMBAT, indipendenti da chi ha avviato
+-- l'attacco).
+--------------------------------------------------------------------------------
+
+local autoAttackActive = false
+
+local autoAttackFrame = CreateFrame("Frame", "WRHT_AutoAttackFrame")
+autoAttackFrame:RegisterEvent("PLAYER_ENTER_COMBAT")
+autoAttackFrame:RegisterEvent("PLAYER_LEAVE_COMBAT")
+autoAttackFrame:SetScript("OnEvent", function()
+	autoAttackActive = (event == "PLAYER_ENTER_COMBAT")
+end)
+
+--------------------------------------------------------------------------------
+-- Ultima azione (OPZIONALE): se One Button Rotation e' installato e /wrh
+-- startlog e' attivo, WRH_DebugLogDB (SavedVariable di quell'addon) contiene
+-- l'ultima azione REALMENTE eseguita - qui solo lettura, mai scrittura.
+--------------------------------------------------------------------------------
+
+local function GetLastLoggedAction()
+	if type(WRH_DebugLogDB) ~= "table" or type(WRH_DebugLogDB.entries) ~= "table" then
+		return nil
+	end
+	local n = table.getn(WRH_DebugLogDB.entries)
+	if n == 0 then
+		return nil
+	end
+	return WRH_DebugLogDB.entries[n]
+end
+
+--------------------------------------------------------------------------------
+-- Quadratini a schermo.
+--------------------------------------------------------------------------------
 
 local squares = {}
 
@@ -124,41 +367,14 @@ local function ClampPct(v)
 	return v
 end
 
--- Ultima entry di WRH_DebugLogDB (One_Button_Rotation, DebugLog.lua) - gia' scritta dai click reali
--- dell'utente quando /wrh startlog e' attivo. Nessuna chiamata a funzioni con side-effect qui: solo
--- lettura di una SavedVariable.
-local function GetLastLoggedAction()
-	if type(WRH_DebugLogDB) ~= "table" or type(WRH_DebugLogDB.entries) ~= "table" then
-		return nil
-	end
-	local n = table.getn(WRH_DebugLogDB.entries)
-	if n == 0 then
-		return nil
-	end
-	return WRH_DebugLogDB.entries[n]
-end
-
 local heartbeat = 0
 
-local function UpdateSquares()
-	SetSquare(0, 255) -- sync marker
-
-	if type(WRH) ~= "table" or type(WRH.GetCurrentStance) ~= "function" then
-		-- One Button Rotation non (ancora) caricato: tutto a zero tranne il sync marker.
-		for i = 1, NUM_SQUARES - 1 do
-			SetSquare(i, 0)
-		end
-		return
-	end
-
-	heartbeat = heartbeat + 1
-	if heartbeat > 255 then
-		heartbeat = 0
-	end
-
-	local stance = WRH.GetCurrentStance()
+-- Raccoglie tutto lo stato corrente in una tabella - usata sia da UpdateSquares (per codificarlo
+-- nei pixel) sia da /wrht status (per stamparlo leggibile in chat, senza passare dal reader Python).
+local function GatherState()
+	local stance = GetCurrentStance()
 	local inCombat = UnitAffectingCombat("player")
-	local hasTarget = (WRH.HasAttackableTarget and WRH.HasAttackableTarget()) or UnitExists("target")
+	local hasTarget = HasAttackableTarget()
 	local targetExists = UnitExists("target")
 
 	local playerHpPct = 0
@@ -180,23 +396,24 @@ local function UpdateSquares()
 		end
 	end
 
-	local sunder = (targetExists and WRH.GetSunderArmorStacks) and WRH.GetSunderArmorStacks() or 0
-	local rend = (targetExists and WRH.IsRendAppliedOnTarget and WRH.IsRendAppliedOnTarget()) and 1 or 0
-	local demoShout = (targetExists and WRH.IsDemoralizingShoutAppliedOnTarget and WRH.IsDemoralizingShoutAppliedOnTarget()) and 1 or 0
-	local overpowerWindow = (WRH.IsOverpowerWindowOpen and WRH.IsOverpowerWindowOpen()) and 1 or 0
-	local revengeWindow = (WRH.IsRevengeWindowOpen and WRH.IsRevengeWindowOpen()) and 1 or 0
+	local sunder = targetExists and GetSunderArmorStacks() or 0
+	local rend = (targetExists and IsRendAppliedOnTarget()) and 1 or 0
+	local demoShout = (targetExists and IsDemoralizingShoutAppliedOnTarget()) and 1 or 0
+	local overpowerWindow = IsOverpowerWindowOpen() and 1 or 0
+	local revengeWindow = IsRevengeWindowOpen() and 1 or 0
 
-	local attackers = (WRH.CountRecentAttackers and WRH.CountRecentAttackers()) or 0
+	local attackers = CountRecentAttackers()
 	if attackers > 99 then
 		attackers = 99
 	end
 
-	local autoAttack = (WRH.IsAutoAttackActive and WRH.IsAutoAttackActive()) and 1 or 0
+	local autoAttack = autoAttackActive and 1 or 0
 
-	local lastKind, lastId = 0, 0
+	local lastKind, lastId, lastName = 0, 0, nil
 	local lastEntry = GetLastLoggedAction()
 	if lastEntry and not lastEntry.noAction then
 		lastKind = ACTION_KIND_IDS[lastEntry.actionKind] or 0
+		lastName = lastEntry.actionName
 		if lastEntry.actionKind == "stance" then
 			lastId = STANCE_IDS[lastEntry.actionName] or 0
 		else
@@ -204,22 +421,51 @@ local function UpdateSquares()
 		end
 	end
 
+	return {
+		stance = stance,
+		inCombat = inCombat,
+		hasTarget = hasTarget,
+		playerHpPct = ClampPct(playerHpPct),
+		rage = rage,
+		targetHpPct = ClampPct(targetHpPct),
+		sunder = sunder,
+		rend = rend,
+		demoShout = demoShout,
+		overpowerWindow = overpowerWindow,
+		revengeWindow = revengeWindow,
+		attackers = attackers,
+		autoAttack = autoAttack,
+		lastKind = lastKind,
+		lastId = lastId,
+		lastName = lastName,
+	}
+end
+
+local function UpdateSquares()
+	heartbeat = heartbeat + 1
+	if heartbeat > 255 then
+		heartbeat = 0
+	end
+
+	local s = GatherState()
+
+	SetSquare(0, 255) -- sync marker
 	SetSquare(1, heartbeat)
-	SetSquare(2, STANCE_IDS[stance] or 0)
-	SetSquare(3, inCombat and 1 or 0)
-	SetSquare(4, hasTarget and 1 or 0)
-	SetSquare(5, ClampPct(playerHpPct))
-	SetSquare(6, rage)
-	SetSquare(7, ClampPct(targetHpPct))
-	SetSquare(8, sunder)
-	SetSquare(9, rend)
-	SetSquare(10, demoShout)
-	SetSquare(11, overpowerWindow)
-	SetSquare(12, revengeWindow)
-	SetSquare(13, attackers)
-	SetSquare(14, autoAttack)
-	SetSquare(15, lastKind)
-	SetSquare(16, lastId)
+	SetSquare(2, STANCE_IDS[s.stance] or 0)
+	SetSquare(3, s.inCombat and 1 or 0)
+	SetSquare(4, s.hasTarget and 1 or 0)
+	SetSquare(5, s.playerHpPct)
+	SetSquare(6, s.rage)
+	SetSquare(7, s.targetHpPct)
+	SetSquare(8, s.sunder)
+	SetSquare(9, s.rend)
+	SetSquare(10, s.demoShout)
+	SetSquare(11, s.overpowerWindow)
+	SetSquare(12, s.revengeWindow)
+	SetSquare(13, s.attackers)
+	SetSquare(14, s.autoAttack)
+	SetSquare(15, s.lastKind)
+	SetSquare(16, s.lastId)
 end
 
 local elapsed = 0
@@ -232,8 +478,9 @@ rootFrame:SetScript("OnUpdate", function()
 	UpdateSquares()
 end)
 
--- Comandi debug, namespace dedicato /wrht (distinto da /wrh di One Button Rotation).
-WRHT.commands = {}
+--------------------------------------------------------------------------------
+-- Comandi debug, namespace dedicato /wrht.
+--------------------------------------------------------------------------------
 
 SLASH_WRHT1 = "/wrht"
 SlashCmdList["WRHT"] = function(msg)
@@ -242,7 +489,7 @@ SlashCmdList["WRHT"] = function(msg)
 	if handler then
 		handler()
 	else
-		DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99WRHT:|r sottocomandi: calibrate, show, hide")
+		DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99WRHT:|r sottocomandi: status, calibrate, show, hide")
 	end
 end
 
@@ -253,6 +500,33 @@ WRHT.commands["calibrate"] = function()
 	DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99WRHT:|r " .. NUM_SQUARES .. " quadratini da " .. SQUARE_SIZE .. "px, ancorati in basso a sinistra dello schermo (BOTTOMLEFT UIParent).")
 	DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99WRHT:|r larghezza totale della fila: " .. (NUM_SQUARES * SQUARE_SIZE) .. "px, altezza: " .. SQUARE_SIZE .. "px.")
 	DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99WRHT:|r quadratino 0 (sync) deve leggersi bianco puro (255,255,255) - usalo per verificare l'allineamento nel reader.")
+end
+
+-- Stampa lo stato corrente in chat, leggibile - utile per verificare in game che la telemetria sia
+-- corretta senza dover gia' avere pronto il reader Python (stesso principio di WRH.DescribeContext
+-- nel progetto principale).
+WRHT.commands["status"] = function()
+	local s = GatherState()
+	local parts = {}
+	table.insert(parts, "stance=" .. tostring(s.stance))
+	table.insert(parts, s.inCombat and "in combattimento" or "fuori combattimento")
+	table.insert(parts, "rage=" .. s.rage)
+	table.insert(parts, "player HP=" .. s.playerHpPct .. "%")
+	if s.hasTarget then
+		table.insert(parts, "target HP=" .. s.targetHpPct .. "%")
+		table.insert(parts, "sunder=" .. s.sunder .. "/5")
+		table.insert(parts, "rend=" .. tostring(s.rend == 1))
+		table.insert(parts, "demoshout=" .. tostring(s.demoShout == 1))
+	else
+		table.insert(parts, "nessun target")
+	end
+	table.insert(parts, "overpower window=" .. tostring(s.overpowerWindow == 1))
+	table.insert(parts, "revenge window=" .. tostring(s.revengeWindow == 1))
+	table.insert(parts, "attaccanti recenti=" .. s.attackers)
+	table.insert(parts, "autoattack=" .. tostring(s.autoAttack == 1))
+	table.insert(parts, "ultima azione=" .. (s.lastName or "n/d (WRH_DebugLogDB assente o /wrh startlog non attivo)"))
+
+	DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99WRHT:|r " .. table.concat(parts, ", "))
 end
 
 WRHT.commands["show"] = function()

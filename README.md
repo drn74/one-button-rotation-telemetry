@@ -1,37 +1,42 @@
 # WRH Telemetry
 
-Estensione companion di [One Button Rotation](../one-button-rotation) (addon Fury Warrior per WoW
-1.12.1 su solocraft.org): espone lo stato letto dalla rotazione — stance, rage, HP, stack di Sunder
-Armor, ultima azione eseguita, ecc. — come una fila di quadratini colorati disegnati in basso a
-sinistra dello schermo di gioco. Un piccolo programma Python li legge via cattura schermo e li
-stampa come tabella in console, cosi' puoi mostrarli durante lo streaming (es. con una window/game
-capture della console in OBS).
+Addon **indipendente** per WoW 1.12.1 (Fury Warrior, pensato per lo stesso setup di
+[One Button Rotation](../one-button-rotation) su solocraft.org, ma non ne richiede il caricamento):
+legge da solo stance, rage, HP, stack di Sunder Armor, finestre Overpower/Revenge, ecc. — con le
+stesse tecniche già verificate in quel progetto (spellbook scan, parsing del combat log per le
+finestre reattive, eventi nativi per l'autoattack) — e li codifica come una fila di quadratini
+colorati disegnati in basso a sinistra dello schermo di gioco. Un piccolo programma Python li legge
+via cattura schermo e li stampa come tabella in console, cosi' puoi mostrarli durante lo streaming
+(es. con una window/game capture della console in OBS).
 
 ## Cosa NON è
 
-Questo è un canale **di sola visualizzazione**. L'addon legge solo getter già esposti da One Button
-Rotation (nessuna chiamata a funzioni con effetti di gioco), e il reader Python **legge soltanto lo
-schermo**: non invia mai click, tasti o altri input al gioco, non decide alcuna azione. Non è un bot
-e non pilota il personaggio — serve solo a portare informazioni già visibili in game su un secondo
-programma per motivi di streaming/telemetria.
+Questo è un canale **di sola visualizzazione**. L'addon calcola tutto da solo con getter puri
+(`UnitHealth`, `GetShapeshiftFormInfo`, `UnitDebuff`, ecc.) e parsing testuale del combat log in
+entrata — nessuna chiamata a funzioni con effetti di gioco (mai `CastSpellByName`, `AttackTarget`,
+`CastShapeshiftForm`). Il reader Python **legge soltanto lo schermo**: non invia mai click, tasti o
+altri input al gioco, non decide alcuna azione. Non è un bot e non pilota il personaggio — serve
+solo a portare informazioni già visibili in game su un secondo programma per motivi di
+streaming/telemetria.
 
 ## Struttura del repository
 
 ```
-Addon/WRH_Telemetry/     addon WoW 1.12.1, disegna i quadratini (sola lettura di WRH)
+Addon/WRH_Telemetry/     addon WoW 1.12.1, indipendente: legge da solo lo stato e disegna i quadratini
 reader/                  script Python che li legge e stampa una tabella in console
 ```
 
 ## Installazione dell'addon
 
-1. Copia la cartella `Addon/WRH_Telemetry` dentro `Interface/AddOns/` del tuo client WoW 1.12.1
-   (accanto alla cartella di `One_Button_Rotation`).
-2. Avvia il gioco (o `/reload` se già loggato) e assicurati che entrambi gli addon siano attivi
-   nella schermata di selezione personaggio.
-3. `WRH_Telemetry` funziona anche se `One_Button_Rotation` non è caricato (mostra tutto a zero), ma
-   ovviamente per avere dati reali ti serve l'addon principale attivo.
-4. Per il campo "ultima azione" ti serve anche il logging di debug dell'addon principale attivo:
-   `/wrh startlog` (vedi CLAUDE.md/spec di One Button Rotation) — senza, quel campo resta vuoto.
+1. Copia la cartella `Addon/WRH_Telemetry` dentro `Interface/AddOns/` del tuo client WoW 1.12.1.
+   Non serve altro: funziona da solo, `One_Button_Rotation` non deve nemmeno essere installato.
+2. Avvia il gioco (o `/reload` se già loggato) e assicurati che l'addon sia attivo nella schermata
+   di selezione personaggio.
+3. **Opzionale** — se hai anche `One_Button_Rotation` installato e attivi il suo logging di debug
+   (`/wrh startlog`, vedi CLAUDE.md/spec di quel progetto), il campo "ultima azione" mostra l'ultima
+   azione REALMENTE eseguita da quell'addon (letta in sola lettura da `WRH_DebugLogDB`). Senza,
+   quel campo resta vuoto — tutto il resto della telemetria (stance, rage, HP, Sunder, ecc.)
+   funziona comunque, calcolato autonomamente da questo addon.
 
 ## Calibrazione (necessaria una volta, o quando cambi risoluzione/posizione finestra)
 
@@ -100,17 +105,22 @@ automatica.
 
 ## Comandi in game
 
+- `/wrht status` — stampa in chat lo stato corrente in forma leggibile (utile per verificare che la
+  telemetria sia corretta senza dover ancora avere pronto il reader Python)
 - `/wrht calibrate` — stampa dimensione/posizione attesa dei quadratini
 - `/wrht show` / `/wrht hide` — mostra/nasconde i quadratini (nascosti = nessun aggiornamento)
 
 ## Limiti noti
 
 - Nessuna verifica in game ancora effettuata su solocraft.org: come da convenzione del progetto
-  principale, ogni assunzione (posizione/scala dei quadratini, `UIParent:GetEffectiveScale()`) va
-  confermata a schermo prima di fidarsene — usa `/wrht calibrate` + una lettura `--once` del reader
-  come primo test.
-- Il campo "ultima azione" riflette l'ultimo click reale solo se `/wrh startlog` è attivo
-  nell'addon principale; è una scelta deliberata per non duplicare quella logica qui.
+  principale, ogni assunzione (posizione/scala dei quadratini, `UIParent:GetEffectiveScale()`,
+  testo esatto dei messaggi di combat log per Overpower/Revenge/multi-target) va confermata a
+  schermo prima di fidarsene — usa `/wrht status` come primo test (non richiede il reader Python),
+  poi `/wrht calibrate` + una lettura `--once` del reader per il canale pixel.
+- Il campo "ultima azione" riflette l'ultimo click reale solo se `One_Button_Rotation` è installato
+  E il suo `/wrh startlog` è attivo — scelta deliberata per non duplicare qui l'intera logica di
+  decisione della rotazione (che tra l'altro ha un side-effect reale, avvia l'autoattack: non va
+  richiamata da un addon di sola telemetria).
 - Risoluzioni/scaling non standard (es. scaling del sistema operativo diverso da 100%) possono
   disallineare la cattura pixel-perfect: se il sync marker non si allinea, prova prima a impostare lo
   scaling del sistema al 100% per il display usato da WoW.
