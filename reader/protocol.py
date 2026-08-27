@@ -6,7 +6,10 @@ se cambi un valore da un lato, cambialo anche qui.
 """
 
 NUM_SQUARES = 17
-SQUARE_SIZE = 4  # pixel fisici per lato di ogni quadratino, deve combaciare con l'addon
+# 1 pixel fisico per valore - deve combaciare esattamente con SQUARE_SIZE nell'addon Lua. Nessun
+# margine di errore sull'allineamento a questa dimensione: vedi la nota nel README sulla precisione
+# richiesta di --left/--bottom quando SQUARE_SIZE=1.
+SQUARE_SIZE = 1
 
 SYNC = 0
 HEARTBEAT = 1

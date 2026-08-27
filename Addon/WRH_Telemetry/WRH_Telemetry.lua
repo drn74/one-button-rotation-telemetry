@@ -37,7 +37,13 @@ WRHT = {}
 WRHT.commands = {}
 
 local NUM_SQUARES = 17
-local SQUARE_SIZE = 4 -- pixel fisici per lato di ogni quadratino
+-- 1 pixel fisico per valore (riga di 17px totali, quasi invisibile). Nessun margine di errore
+-- sull'allineamento: se il reader campiona anche solo 1px fuori posto legge il valore sbagliato
+-- senza errori visibili - va calibrato con precisione (vedi README.md). Con un valore piu' alto
+-- (es. 4) il reader campiona il pixel centrale di ogni blocco, tollerando piccoli errori di
+-- posizionamento - scelta deliberata dell'utente di rinunciare a quel margine per un footprint
+-- minimo.
+local SQUARE_SIZE = 1
 local UPDATE_INTERVAL = 0.2 -- secondi tra un aggiornamento e l'altro (5 Hz, sufficiente per uno stream)
 
 -- Stessa mappatura di STANCE_IDS/ACTION_IDS/ACTION_KIND_IDS deve esistere in reader/protocol.py.

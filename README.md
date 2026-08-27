@@ -40,11 +40,15 @@ reader/                  script Python che li legge e stampa una tabella in cons
 
 ## Calibrazione (necessaria una volta, o quando cambi risoluzione/posizione finestra)
 
-I quadratini sono ancorati all'angolo in basso a sinistra dello **schermo di gioco** (non
-dell'intero monitor, se giochi in finestra). Il reader Python deve sapere dove si trova quell'angolo
-in coordinate assolute dello schermo.
+I pixel sono ancorati all'angolo in basso a sinistra dello **schermo di gioco** (non dell'intero
+monitor, se giochi in finestra). Il reader Python deve sapere dove si trova quell'angolo in
+coordinate assolute dello schermo, **con precisione al pixel**: a differenza di una versione con
+blocchi più grandi, qui non c'è margine di errore — un `--left`/`--bottom` sbagliato anche di 1px
+fa leggere al reader il pixel adiacente (valore completamente diverso), senza nessun errore
+visibile a schermo. Imposta anche lo scaling del sistema operativo al 100% sul display usato da
+WoW prima di calibrare (vedi "Limiti noti").
 
-1. In game, digita `/wrht calibrate`: stampa in chat dimensione e numero dei quadratini.
+1. In game, digita `/wrht calibrate`: stampa in chat dimensione e numero dei pixel.
 2. Determina la posizione in pixel assoluti sullo schermo dell'angolo in basso a sinistra della
    finestra di gioco:
    - **Fullscreen** sul monitor principale: quasi sempre `left=0`, `bottom` = altezza del monitor in
@@ -77,8 +81,10 @@ segnala se lo `heartbeat` smette di avanzare (addon fermo: reload, logout, gioco
 
 ## Protocollo
 
-17 quadratini da 4x4 pixel fisici ciascuno, in fila da sinistra a destra, un solo canale (R, dato
-che l'addon scrive sempre R=G=B in scala di grigi) per valore 0-255. Definito in
+17 pixel fisici in fila da sinistra a destra (1 pixel = 1 valore, riga alta 1px, larga 17px in
+totale — quasi invisibile), un solo canale (R, dato che l'addon scrive sempre R=G=B in scala di
+grigi) per valore 0-255. Nessun margine di errore sull'allineamento a questa dimensione: vedi
+"Calibrazione" sotto. Definito in
 `Addon/WRH_Telemetry/WRH_Telemetry.lua` (commento in testa al file) e mirrorato in
 `reader/protocol.py` — le due liste vanno mantenute sincronizzate a mano, non c'è generazione
 automatica.
